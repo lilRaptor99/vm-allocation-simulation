@@ -1,9 +1,12 @@
-package dev.pratheeks;
+package dev.pratheeks.vmallocationsimulation;
 
+import com.opencsv.bean.StatefulBeanToCsv;
+import com.opencsv.bean.StatefulBeanToCsvBuilder;
+import com.opencsv.exceptions.CsvDataTypeMismatchException;
+import com.opencsv.exceptions.CsvRequiredFieldEmptyException;
 import org.cloudsimplus.allocationpolicies.VmAllocationPolicy;
 import org.cloudsimplus.allocationpolicies.VmAllocationPolicyFirstFit;
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
-import org.cloudsimplus.builders.tables.CloudletsTableBuilder;
 import org.cloudsimplus.cloudlets.CloudletSimple;
 import org.cloudsimplus.core.CloudSimPlus;
 import org.cloudsimplus.datacenters.DatacenterSimple;
@@ -20,16 +23,21 @@ import org.cloudsimplus.utilizationmodels.UtilizationModelFull;
 import org.cloudsimplus.vms.Vm;
 import org.cloudsimplus.vms.VmSimple;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 
 public class VmMigrationSimulation {
-    private static final int HOSTS = 10;
+    private final int HOSTS;
     private static final int HOST_PES = 64; // 64 core CPUs
     private static final long HOST_RAM = 128_000; // 128 GB
     private static final long HOST_STORAGE = 10_000_000; // 10 TB
     private static final long HOST_BW = 10_000; // 10 Gbps
 
-    private static final int VMS = 30;
+    private final int VMS;
     private static final long VM_SIZE = 10_000; // 10 GB
     private static final long VM_BW = 1000; // 1 Gbps
     private static final long VM_RAM_MIN = 1000; // 1 GB
@@ -39,8 +47,11 @@ public class VmMigrationSimulation {
 
     private static final int CLOUDLET_LENGTH = 10_000_000;
 
-    private static final int MINIMUM_ALLOCATIONS_PER_SIMULATION = 100; // Should perform at least 100 VM migrations (allocations)
-    // to properly assess the allocation algorithm
+    /**
+     * Should perform at least 100 VM migrations (allocations) to properly assess the allocation algorithm
+     */
+    private static final int MINIMUM_ALLOCATIONS_PER_SIMULATION = 100; //
+
     private int totalNumberOfAllocations = 0;
     private int failedVmMigrations = 0;
     private int currentlyMigratingVMCount = 0;
@@ -52,19 +63,25 @@ public class VmMigrationSimulation {
     private final List<Vm> vmList = new ArrayList<>();
     private boolean migrationRequested = false;
 
-    private final Random random = new Random(1); // Change the random seed to get different VM configurations
+    /**
+     * Random seed decides the random VM configuration for the simulation run
+     */
+    private final Random random;
 
-    private final VmAllocationPolicy vmAllocationAlgo = new VmAllocationPolicyFirstFit();
+    private final List<CSVBean> csvLines= new ArrayList<>();
 
-    public static void main(String[] args) {
-        new VmMigrationSimulation();
-    }
+    public VmMigrationSimulation(VmAllocationPolicy vmAllocationAlgo, int hostCount, long randomSeed) throws IOException, CsvRequiredFieldEmptyException, CsvDataTypeMismatchException {
+        String allocationAlgoName = vmAllocationAlgo.getClass().getSimpleName();
+        HOSTS = hostCount;
+        VMS = HOSTS * 3; // 3 times the host count
+        random = new Random(randomSeed);
 
-    public VmMigrationSimulation() {
-        // MigrationNumber VM_ID Allocation_time From_Host To_Host Success
+        System.out.printf("Starting simulation with %d Hosts with %d VMs for allocation algorithm: %s. Random seed: %d%n",
+                HOSTS, VMS, allocationAlgoName, randomSeed);
+
         Log.setLevel(ch.qos.logback.classic.Level.WARN); // Limit log output
         simulation = new CloudSimPlus();
-        datacenter = createDatacenter();
+        datacenter = createDatacenter(vmAllocationAlgo);
         broker = new DatacenterBrokerSimple(simulation);
 
         createAndSubmitVms();
@@ -77,11 +94,25 @@ public class VmMigrationSimulation {
 
         simulation.start();
 
-//        new CloudletsTableBuilder(broker.getCloudletFinishedList()).build();
+        // new CloudletsTableBuilder(broker.getCloudletFinishedList()).build();
         System.out.printf("Simulation finished with %d VM migrations. Of which %d migrations failed!%n", totalNumberOfAllocations, failedVmMigrations);
+
+        // Writing the output to CSV
+        String outputDir = "results/" + allocationAlgoName;
+        Files.createDirectories(Paths.get(outputDir));
+        String csvFileName = outputDir + "/" + allocationAlgoName + "_hosts_" + HOSTS + "_" + randomSeed + ".csv";
+        Writer writer = new FileWriter(csvFileName);
+        var mappingStrategy = new CustomColumnPositionStrategy<CSVBean>();
+        mappingStrategy.setType(CSVBean.class);
+        StatefulBeanToCsv<CSVBean> beanToCsv = new StatefulBeanToCsvBuilder<CSVBean>(writer)
+                .withMappingStrategy(mappingStrategy)
+                .withApplyQuotesToAll(false)
+                .build();
+        beanToCsv.write(csvLines);
+        writer.close();
     }
 
-    private DatacenterSimple createDatacenter() {
+    private DatacenterSimple createDatacenter(VmAllocationPolicy vmAllocationAlgo) {
         for (int i = 0; i < HOSTS; i++) {
             hostList.add(createHost());
         }
@@ -160,7 +191,7 @@ public class VmMigrationSimulation {
 
     private void migrateVmsInAHost(EventInfo info){
         if (totalNumberOfAllocations < MINIMUM_ALLOCATIONS_PER_SIMULATION) {
-            System.out.printf("\n\n##### Scheduling VM migration in a host... Current time: %f%n", info.getTime());
+            System.out.printf("\n##### Scheduling VM migration in a host... Current time: %f%n", info.getTime());
             Host sourceHost = selectRandomHostWithVms();
             if (sourceHost == null) {
                 System.out.println("!!!!! ERROR: No VMs to migrate.");
@@ -184,18 +215,24 @@ public class VmMigrationSimulation {
     }
 
     private void migrateAllVmsFromHost(Host sourceHost) {
+
         System.out.printf("#>>> Migration command received to migrate VMs in Host %d <<<%n", sourceHost.getId());
         for (Vm vm : sourceHost.getVmList()) {
             // Allocating a host for the VM in source host
+            long start = System.nanoTime();
             final var targetHost = datacenter.getVmAllocationPolicy().findHostForVm(vm).orElse(Host.NULL);
+            long end = System.nanoTime();
             totalNumberOfAllocations++;
             if (Host.NULL.equals(targetHost)) {
                 System.out.printf("!!!!! No suitable host found for VM %d%n", vm.getId());
+                csvLines.add(new CSVBean(vm.getId(), end-start, false, sourceHost.getId(), -1L, 0, false));
                 continue;
             }
+            // TODO: Get migration time and migration status from migration completion event
+            csvLines.add(new CSVBean(vm.getId(), end-start, true, sourceHost.getId(), targetHost.getId(), 0, true));
             System.out.printf(">>>> Migrating VM %d from Host %d to Host %d%n", vm.getId(), sourceHost.getId(), targetHost.getId());
             datacenter.requestVmMigration(vm, targetHost);
-            currentlyMigratingVMCount ++;
+            currentlyMigratingVMCount++;
         }
     }
 }
