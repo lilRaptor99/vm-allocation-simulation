@@ -4,8 +4,8 @@ import com.opencsv.bean.StatefulBeanToCsv;
 import com.opencsv.bean.StatefulBeanToCsvBuilder;
 import com.opencsv.exceptions.CsvDataTypeMismatchException;
 import com.opencsv.exceptions.CsvRequiredFieldEmptyException;
+import dev.pratheeks.vmallocationsimulation.allocationpolicy.allocationpolicy4dbinpacking.VmAllocationPolicy4DBinPacking;
 import org.cloudsimplus.allocationpolicies.VmAllocationPolicy;
-import org.cloudsimplus.allocationpolicies.VmAllocationPolicyFirstFit;
 import org.cloudsimplus.brokers.DatacenterBrokerSimple;
 import org.cloudsimplus.cloudlets.CloudletSimple;
 import org.cloudsimplus.core.CloudSimPlus;
@@ -184,7 +184,7 @@ public class VmMigrationSimulation {
             failedVmMigrations++;
         }
         currentlyMigratingVMCount--;
-        if(currentlyMigratingVMCount <= 5){
+        if(currentlyMigratingVMCount <= 2){
             migrateVmsInAHost(info);
         }
     }
@@ -217,19 +217,42 @@ public class VmMigrationSimulation {
     private void migrateAllVmsFromHost(Host sourceHost) {
 
         System.out.printf("#>>> Migration command received to migrate VMs in Host %d <<<%n", sourceHost.getId());
+
+        List<Vm> vmsToMigrate = sourceHost.getVmList();
+        long preProcessingTime = 0;
+
+        VmAllocationPolicy vmAllocationPolicy = datacenter.getVmAllocationPolicy();
+
+        if(vmAllocationPolicy.getClass().getSimpleName().equals("VmAllocationPolicy4DBinPacking")){
+            long start = System.nanoTime();
+            ((VmAllocationPolicy4DBinPacking)vmAllocationPolicy).recalculatePacking(sourceHost);
+            long end = System.nanoTime();
+            preProcessingTime = end-start;
+        }
+
+        double preProcessingTimePerVm = ((double) preProcessingTime / vmsToMigrate.size()) / 1_000_000.0;
+
+        System.out.println("##### VMs to migrate: " + vmsToMigrate.size());
+        System.out.println("##### Pre-processing time per VM: " + preProcessingTimePerVm + " ms");
+
         for (Vm vm : sourceHost.getVmList()) {
             // Allocating a host for the VM in source host
             long start = System.nanoTime();
-            final var targetHost = datacenter.getVmAllocationPolicy().findHostForVm(vm).orElse(Host.NULL);
+            final var targetHost = vmAllocationPolicy.findHostForVm(vm).orElse(Host.NULL);
             long end = System.nanoTime();
             totalNumberOfAllocations++;
+
+            double allocationTime = ((end-start) / 1_000_000.0) + preProcessingTimePerVm;
+
             if (Host.NULL.equals(targetHost)) {
                 System.out.printf("!!!!! No suitable host found for VM %d%n", vm.getId());
-                csvLines.add(new CSVBean(vm.getId(), end-start, false, sourceHost.getId(), -1L, 0, false));
+                csvLines.add(new CSVBean(vm.getId(), allocationTime, false,
+                        sourceHost.getId(), -1L, 0, false));
                 continue;
             }
             // TODO: Get migration time and migration status from migration completion event
-            csvLines.add(new CSVBean(vm.getId(), end-start, true, sourceHost.getId(), targetHost.getId(), 0, true));
+            csvLines.add(new CSVBean(vm.getId(), allocationTime, true,
+                    sourceHost.getId(), targetHost.getId(), 0, true));
             System.out.printf(">>>> Migrating VM %d from Host %d to Host %d%n", vm.getId(), sourceHost.getId(), targetHost.getId());
             datacenter.requestVmMigration(vm, targetHost);
             currentlyMigratingVMCount++;
