@@ -1,0 +1,7 @@
+vmId,allocationTime,allocated,fromHost,toHost,migrationTime,migrationSuccess
+39,562.4203333333335,true,6,7,0.0,true
+40,562.4033333333334,true,6,7,0.0,true
+41,562.4033333333334,true,6,7,0.0,true
+42,562.4015333333334,true,6,7,0.0,true
+43,562.4009333333335,true,6,7,0.0,true
+44,562.4008333333335,true,6,7,0.0,true
